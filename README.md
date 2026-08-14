@@ -20,8 +20,9 @@ Windows PC or a USB drive.
 
 - Microphone audio is checked ~5x/second against YAMNet's Dog / Bark /
   Bow-wow / Howl / Growling classes.
-- If the confidence crosses the threshold, it plays an alert sound and
-  waits `cooldown_seconds` before it can alert again.
+- If the confidence crosses the threshold, it waits `trigger_delay_seconds`
+  (so the mic has time to stop hearing the bark) then plays an alert
+  sound, and waits `cooldown_seconds` before it can alert again.
 - A live graph shows the confidence line and the threshold line so you
   can see it working.
 - Ships with two default alert sounds (`sit-down.wav` is ticked by
@@ -36,6 +37,12 @@ Windows PC or a USB drive.
 - **Bark threshold slider** - drag it while the app is running to tune
   sensitivity in real time; the graph's threshold line moves with it.
 - **Cooldown slider** - how many seconds to wait between alerts (0-60s).
+- **Trigger delay slider** - pause between a bark being detected and
+  the alert sound actually playing (0-3s, default 0.5s). Gives the
+  mic a moment to stop hearing the bark before the sound plays, so
+  the alert isn't drowned out or muddied by the bark itself. The
+  status line shows a countdown ("playing sound in 0.3s...") while
+  this pause is running.
 - **Alert sounds** - drop `.wav` files into the `sounds` folder next
   to the app, click "Refresh list", then tick the ones you want active.
 - **Play mode** - "In order" cycles through your ticked sounds one
@@ -94,6 +101,9 @@ py -3.11 -m venv venv
   published `checksums.txt` for that release.
 
 ## Changelog
+- v1.4.0: trigger delay slider - configurable pause (0-3s, default
+  0.5s) between a bark being detected and the alert sound playing, so
+  the mic has time to stop hearing the bark before playback starts.
 - v1.3.0: microphone picker, cooldown slider, bundled default alert
   sounds (`sit-down.wav` ticked by default, `sit-down-sorry-dog.wav`
   available unticked) - both clipped from Barnaby Joyce's

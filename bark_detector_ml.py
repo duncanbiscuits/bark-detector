@@ -8,9 +8,9 @@ its confidence crosses a threshold. Shows a live scrolling graph of
 that confidence against the threshold line, and flashes when it fires.
 
 You can tick which alert sound files to use (played in order or at
-random), pick the microphone, and drag the threshold/cooldown sliders
-to tune everything live, all from the app window - no need to edit
-config.ini by hand for any of these.
+random), pick the microphone, and drag the threshold/cooldown/trigger
+delay sliders to tune everything live, all from the app window - no
+need to edit config.ini by hand for any of these.
 
 On startup it also checks GitHub for a newer release, and if one is
 available, downloads it, verifies its checksum, and restarts itself
@@ -79,6 +79,7 @@ UPDATE_DOWNLOAD_TIMEOUT = 60
 DEFAULTS = {
     "bark_threshold": "0.3",           # 0.0-1.0 confidence needed to count as a bark
     "cooldown_seconds": "5",           # minimum gap between two alerts
+    "trigger_delay_seconds": "0.5",    # pause after a bark is detected before the sound plays
     "sound_file": "",                  # legacy single-sound setting, kept for compatibility
     "device": "",                      # blank = system default microphone, else a device index
     "history_seconds": "15",           # how much time the graph shows
@@ -305,6 +306,7 @@ class BarkApp:
         self.version = version
         self.threshold = float(cfg["bark_threshold"])
         self.cooldown = float(cfg["cooldown_seconds"])
+        self.trigger_delay = float(cfg.get("trigger_delay_seconds", DEFAULTS["trigger_delay_seconds"]))
         self.history_seconds = float(cfg["history_seconds"])
         self._cfg_raw = dict(cfg)
 
@@ -355,6 +357,8 @@ class BarkApp:
         self.last_alert_str = "none yet"
         self.flash_until = 0.0
         self.mic_error = None
+        self.pending_play = False
+        self.pending_until = 0.0
 
         self._build_ui()
         self._refresh_sound_list()
@@ -384,7 +388,7 @@ class BarkApp:
     # ---------- UI ----------
     def _build_ui(self):
         self.root.title(f"Bark Detector v{self.version}")
-        self.root.geometry("780x700")
+        self.root.geometry("780x760")
         self.root.configure(bg="#1e1e1e")
         label_opts = dict(bg="#1e1e1e", fg="#eeeeee")
 
@@ -442,7 +446,7 @@ class BarkApp:
 
         # ---- cooldown slider ----
         cooldown_frame = tk.Frame(self.root, bg="#1e1e1e")
-        cooldown_frame.pack(fill="x", padx=12, pady=(4, 8))
+        cooldown_frame.pack(fill="x", padx=12, pady=(4, 4))
 
         tk.Label(cooldown_frame, text="Cooldown (s):", font=("Segoe UI", 10, "bold"),
                  **label_opts).pack(side="left")
@@ -460,6 +464,34 @@ class BarkApp:
         )
         self.cooldown_slider.set(self.cooldown)
         self.cooldown_slider.pack(side="left", fill="x", expand=True, padx=(10, 10))
+
+        # ---- trigger delay slider ----
+        delay_frame = tk.Frame(self.root, bg="#1e1e1e")
+        delay_frame.pack(fill="x", padx=12, pady=(4, 8))
+
+        tk.Label(delay_frame, text="Trigger delay (s):", font=("Segoe UI", 10, "bold"),
+                 **label_opts).pack(side="left")
+        self.delay_value_label = tk.Label(
+            delay_frame, text=f"{self.trigger_delay:.1f}", font=("Segoe UI", 10, "bold"),
+            fg="#4ea1ff", bg="#1e1e1e", width=5,
+        )
+        self.delay_value_label.pack(side="right")
+
+        self.delay_slider = tk.Scale(
+            delay_frame, from_=0.0, to=3.0, resolution=0.1, orient="horizontal",
+            length=460, showvalue=False, bg="#1e1e1e", fg="#eeeeee",
+            troughcolor="#333333", highlightthickness=0, activebackground="#4ea1ff",
+            command=self._on_delay_slide,
+        )
+        self.delay_slider.set(self.trigger_delay)
+        self.delay_slider.pack(side="left", fill="x", expand=True, padx=(10, 10))
+
+        tk.Label(
+            self.root,
+            text="Pause between a bark being detected and the sound playing - "
+                 "gives the mic time to stop hearing the bark so the alert plays clearly.",
+            font=("Segoe UI", 8), fg="#777777", bg="#1e1e1e", justify="left", anchor="w",
+        ).pack(fill="x", padx=12, pady=(0, 6))
 
         # ---- alert sounds panel ----
         sounds_frame = tk.LabelFrame(
@@ -536,6 +568,11 @@ class BarkApp:
         self.cooldown_value_label.config(text=f"{self.cooldown:.0f}")
         self._save_config()
 
+    def _on_delay_slide(self, value):
+        self.trigger_delay = float(value)
+        self.delay_value_label.config(text=f"{self.trigger_delay:.1f}")
+        self._save_config()
+
     def _on_mode_change(self):
         self.sound_mode = self.sound_mode_var.get()
         self._play_index = 0
@@ -607,6 +644,7 @@ class BarkApp:
         data = dict(self._cfg_raw)
         data["bark_threshold"] = f"{self.threshold:.2f}"
         data["cooldown_seconds"] = f"{self.cooldown:.0f}"
+        data["trigger_delay_seconds"] = f"{self.trigger_delay:.1f}"
         data["device"] = "" if self.device is None else str(self.device)
         data["sound_mode"] = self.sound_mode
         data["sound_files_enabled"] = ",".join(self._get_enabled_sound_names())
@@ -643,6 +681,15 @@ class BarkApp:
             play_alert(enabled[self._play_index % len(enabled)])
             self._play_index += 1
 
+    def _fire_alert(self):
+        """Called once the trigger-delay pause has elapsed - actually plays
+        the sound and flashes the graph. Kept separate from detection so the
+        mic has time to stop hearing the bark before playback starts."""
+        self.pending_play = False
+        self.last_alert_str = datetime.now().strftime("%H:%M:%S")
+        self.flash_until = time.monotonic() + 0.6
+        self._play_next_sound()
+
     # ---------- main loop ----------
     def _tick(self):
         snap = self.ring.snapshot(INFER_WINDOW_SECONDS)
@@ -658,26 +705,29 @@ class BarkApp:
         now = time.monotonic()
         self.history.append(score)
 
-        triggered = False
-        if score >= self.threshold and (now - self.last_alert) >= self.cooldown:
+        if (not self.pending_play) and score >= self.threshold and (now - self.last_alert) >= self.cooldown:
             self.last_alert = now
-            self.last_alert_str = datetime.now().strftime("%H:%M:%S")
-            self.flash_until = now + 0.6
-            triggered = True
-            self._play_next_sound()
+            delay_ms = max(0, int(self.trigger_delay * 1000))
+            if delay_ms > 0:
+                self.pending_play = True
+                self.pending_until = now + self.trigger_delay
+                self.root.after(delay_ms, self._fire_alert)
+            else:
+                self._fire_alert()
 
-        self._redraw(score, triggered)
+        self._redraw(score)
         self.root.after(UPDATE_INTERVAL_MS, self._tick)
 
     # ---------- drawing ----------
-    def _redraw(self, score, triggered):
+    def _redraw(self, score):
         c = self.canvas
         c.delete("all")
         w = int(c["width"])
         h = int(c["height"])
         pad = 20
 
-        flashing = time.monotonic() < self.flash_until
+        now = time.monotonic()
+        flashing = now < self.flash_until
         bg = "#3a1010" if flashing else "#111111"
         c.configure(bg=bg)
 
@@ -704,10 +754,20 @@ class BarkApp:
         c.create_text(pad, pad - 5, text=f"bark confidence: {score:.2f}",
                        fill=color, anchor="nw", font=("Segoe UI", 11, "bold"))
 
-        state = "BARK DETECTED - alert played" if flashing else "listening..."
+        if flashing:
+            state = "BARK DETECTED - alert played"
+            fg = "#ff8080"
+        elif self.pending_play:
+            remaining = max(0.0, self.pending_until - now)
+            state = f"bark detected - playing sound in {remaining:.1f}s..."
+            fg = "#ffcc66"
+        else:
+            state = "listening..."
+            fg = "#eeeeee"
+
         self.status_label.config(
             text=f"{state}    |    last alert: {self.last_alert_str}",
-            fg="#ff8080" if flashing else "#eeeeee",
+            fg=fg,
         )
         self.detail_label.config(
             text=f"v{self.version}  mic={self._mic_display_name()}  mode={self.sound_mode}"

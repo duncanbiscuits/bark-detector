@@ -1,0 +1,55 @@
+name: Build and release BarkDetectorML
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Write version file
+        shell: pwsh
+        run: '"${{ github.ref_name }}" | Out-File -FilePath version.txt -Encoding ascii -NoNewline'
+
+      - name: Build portable exe
+        run: >
+          pyinstaller --onefile --console --name BarkDetectorML
+          --add-data "yamnet.tflite;."
+          --add-data "yamnet_class_map.csv;."
+          --add-data "version.txt;."
+          --collect-all ai_edge_litert
+          --collect-data certifi
+          bark_detector_ml.py
+
+      - name: Generate checksum
+        shell: pwsh
+        run: |
+          $hash = Get-FileHash -Path dist\BarkDetectorML.exe -Algorithm SHA256
+          "$($hash.Hash.ToLower())  BarkDetectorML.exe" | Out-File -FilePath dist\checksums.txt -Encoding ascii
+
+      - name: Publish release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: >
+          gh release create "${{ github.ref_name }}"
+          dist/BarkDetectorML.exe dist/checksums.txt
+          --title "Bark Detector ${{ github.ref_name }}"
+          --notes "Automated build from tag ${{ github.ref_name }}."

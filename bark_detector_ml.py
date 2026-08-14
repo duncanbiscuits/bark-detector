@@ -8,8 +8,9 @@ its confidence crosses a threshold. Shows a live scrolling graph of
 that confidence against the threshold line, and flashes when it fires.
 
 You can tick which alert sound files to use (played in order or at
-random) and drag the threshold slider to tune sensitivity live, both
-from the app window - no need to edit config.ini for these.
+random), pick the microphone, and drag the threshold/cooldown sliders
+to tune everything live, all from the app window - no need to edit
+config.ini by hand for any of these.
 
 On startup it also checks GitHub for a newer release, and if one is
 available, downloads it, verifies its checksum, and restarts itself
@@ -46,7 +47,7 @@ import tkinter as tk
 import urllib.request
 from collections import deque
 from datetime import datetime
-from tkinter import filedialog, messagebox
+from tkinter import filedialog, messagebox, ttk
 
 import numpy as np
 import sounddevice as sd
@@ -60,11 +61,13 @@ MODEL_FILENAME = "yamnet.tflite"
 LABELS_FILENAME = "yamnet_class_map.csv"
 VERSION_FILENAME = "version.txt"
 SOUNDS_DIRNAME = "sounds"
+DEFAULT_SOUNDS_DIRNAME = "default_sounds"
 TARGET_LABELS = ["Dog", "Bark", "Bow-wow", "Howl", "Growling"]
 SAMPLE_RATE = 16000
 RING_SECONDS = 1.5
 INFER_WINDOW_SECONDS = 1.0
 UPDATE_INTERVAL_MS = 200
+DEFAULT_MIC_LABEL = "System default"
 
 GITHUB_OWNER = "duncanbiscuits"
 GITHUB_REPO = "bark-detector"
@@ -74,14 +77,14 @@ UPDATE_CHECK_TIMEOUT = 6
 UPDATE_DOWNLOAD_TIMEOUT = 60
 
 DEFAULTS = {
-    "bark_threshold": "0.3",       # 0.0-1.0 confidence needed to count as a bark
-    "cooldown_seconds": "5",       # minimum gap between two alerts
-    "sound_file": "",              # legacy single-sound setting, kept for compatibility
-    "device": "",                  # blank = system default microphone
-    "history_seconds": "15",       # how much time the graph shows
-    "auto_update": "true",         # check GitHub for a newer release on startup
-    "sound_mode": "order",         # "order" = cycle through ticked sounds, "random" = pick one at random
-    "sound_files_enabled": "",     # comma list of ticked filenames inside the sounds/ folder
+    "bark_threshold": "0.3",           # 0.0-1.0 confidence needed to count as a bark
+    "cooldown_seconds": "5",           # minimum gap between two alerts
+    "sound_file": "",                  # legacy single-sound setting, kept for compatibility
+    "device": "",                      # blank = system default microphone, else a device index
+    "history_seconds": "15",           # how much time the graph shows
+    "auto_update": "true",             # check GitHub for a newer release on startup
+    "sound_mode": "order",             # "order" = cycle through ticked sounds, "random" = pick one at random
+    "sound_files_enabled": "sit-down.wav",  # comma list of ticked filenames inside the sounds/ folder
 }
 
 
@@ -250,6 +253,18 @@ def load_target_indices():
     return [idx_by_name[n] for n in TARGET_LABELS if n in idx_by_name]
 
 
+def list_input_devices():
+    """Returns [(index, name), ...] for devices with at least one input channel."""
+    devices = []
+    try:
+        for i, d in enumerate(sd.query_devices()):
+            if d.get("max_input_channels", 0) > 0:
+                devices.append((i, d.get("name", f"Device {i}")))
+    except Exception as e:
+        print(f"  ! could not list audio devices: {e}")
+    return devices
+
+
 def play_alert(sound_file):
     try:
         if sound_file and os.path.exists(sound_file):
@@ -290,9 +305,11 @@ class BarkApp:
         self.version = version
         self.threshold = float(cfg["bark_threshold"])
         self.cooldown = float(cfg["cooldown_seconds"])
-        self.device = cfg["device"].strip() or None
         self.history_seconds = float(cfg["history_seconds"])
         self._cfg_raw = dict(cfg)
+
+        self.input_devices = list_input_devices()
+        self.device = self._resolve_initial_device(cfg["device"].strip())
 
         self.sounds_dir = os.path.join(base_dir(), SOUNDS_DIRNAME)
         os.makedirs(self.sounds_dir, exist_ok=True)
@@ -304,8 +321,23 @@ class BarkApp:
         self.available_sounds = []
         self.sound_vars = {}
 
-        # One-time convenience: if the sounds folder is empty, seed it with
-        # whatever the old single "sound_file" setting pointed at.
+        # First run: seed the sounds folder with the bundled default sounds
+        # (sit-down.wav, sit-down-sorry-dog.wav) so the app works out of the
+        # box. Only happens once - if the folder already has files, or the
+        # user has emptied it on purpose, we leave it alone.
+        if not os.listdir(self.sounds_dir):
+            default_sounds_src = resource_path(DEFAULT_SOUNDS_DIRNAME)
+            if os.path.isdir(default_sounds_src):
+                for name in os.listdir(default_sounds_src):
+                    if name.lower().endswith(".wav"):
+                        try:
+                            shutil.copy(os.path.join(default_sounds_src, name),
+                                        os.path.join(self.sounds_dir, name))
+                        except Exception:
+                            pass
+
+        # One-time convenience: also honour the old single "sound_file"
+        # setting if someone still has it set from an older version.
         legacy = cfg.get("sound_file", "").strip()
         if legacy and os.path.exists(legacy) and not os.listdir(self.sounds_dir):
             try:
@@ -322,16 +354,37 @@ class BarkApp:
         self.last_alert = 0.0
         self.last_alert_str = "none yet"
         self.flash_until = 0.0
+        self.mic_error = None
 
         self._build_ui()
         self._refresh_sound_list()
         self._start_audio()
         self.root.after(UPDATE_INTERVAL_MS, self._tick)
 
+    # ---------- device helpers ----------
+    def _resolve_initial_device(self, cfg_device):
+        if not cfg_device:
+            return None
+        try:
+            idx = int(cfg_device)
+            if any(i == idx for i, _ in self.input_devices):
+                return idx
+        except ValueError:
+            pass
+        return None  # saved device no longer exists - fall back to default
+
+    def _mic_display_name(self):
+        if self.device is None:
+            return DEFAULT_MIC_LABEL
+        for i, name in self.input_devices:
+            if i == self.device:
+                return name
+        return DEFAULT_MIC_LABEL
+
     # ---------- UI ----------
     def _build_ui(self):
         self.root.title(f"Bark Detector v{self.version}")
-        self.root.geometry("780x660")
+        self.root.geometry("780x700")
         self.root.configure(bg="#1e1e1e")
         label_opts = dict(bg="#1e1e1e", fg="#eeeeee")
 
@@ -341,7 +394,7 @@ class BarkApp:
         )
         self.status_label.pack(fill="x", padx=12, pady=(10, 4))
 
-        self.canvas = tk.Canvas(self.root, width=750, height=260, bg="#111111",
+        self.canvas = tk.Canvas(self.root, width=750, height=230, bg="#111111",
                                  highlightthickness=0)
         self.canvas.pack(padx=12, pady=6)
 
@@ -351,9 +404,24 @@ class BarkApp:
         )
         self.detail_label.pack(fill="x", padx=12, pady=(0, 6))
 
+        # ---- microphone selector ----
+        mic_frame = tk.Frame(self.root, bg="#1e1e1e")
+        mic_frame.pack(fill="x", padx=12, pady=(0, 6))
+        tk.Label(mic_frame, text="Microphone:", font=("Segoe UI", 10, "bold"),
+                 **label_opts).pack(side="left")
+
+        self.mic_values = [DEFAULT_MIC_LABEL] + [f"{i}: {name}" for i, name in self.input_devices]
+        self.mic_var = tk.StringVar(value=self._mic_current_value())
+        self.mic_combo = ttk.Combobox(
+            mic_frame, textvariable=self.mic_var, values=self.mic_values,
+            state="readonly", width=60,
+        )
+        self.mic_combo.pack(side="left", padx=(10, 0), fill="x", expand=True)
+        self.mic_combo.bind("<<ComboboxSelected>>", self._on_mic_change)
+
         # ---- threshold slider ----
         thresh_frame = tk.Frame(self.root, bg="#1e1e1e")
-        thresh_frame.pack(fill="x", padx=12, pady=(4, 8))
+        thresh_frame.pack(fill="x", padx=12, pady=(4, 4))
 
         tk.Label(thresh_frame, text="Bark threshold:", font=("Segoe UI", 10, "bold"),
                  **label_opts).pack(side="left")
@@ -365,12 +433,33 @@ class BarkApp:
 
         self.threshold_slider = tk.Scale(
             thresh_frame, from_=0.0, to=1.0, resolution=0.01, orient="horizontal",
-            length=520, showvalue=False, bg="#1e1e1e", fg="#eeeeee",
+            length=460, showvalue=False, bg="#1e1e1e", fg="#eeeeee",
             troughcolor="#333333", highlightthickness=0, activebackground="#4ea1ff",
             command=self._on_threshold_slide,
         )
         self.threshold_slider.set(self.threshold)
         self.threshold_slider.pack(side="left", fill="x", expand=True, padx=(10, 10))
+
+        # ---- cooldown slider ----
+        cooldown_frame = tk.Frame(self.root, bg="#1e1e1e")
+        cooldown_frame.pack(fill="x", padx=12, pady=(4, 8))
+
+        tk.Label(cooldown_frame, text="Cooldown (s):", font=("Segoe UI", 10, "bold"),
+                 **label_opts).pack(side="left")
+        self.cooldown_value_label = tk.Label(
+            cooldown_frame, text=f"{self.cooldown:.0f}", font=("Segoe UI", 10, "bold"),
+            fg="#4ea1ff", bg="#1e1e1e", width=5,
+        )
+        self.cooldown_value_label.pack(side="right")
+
+        self.cooldown_slider = tk.Scale(
+            cooldown_frame, from_=0, to=60, resolution=1, orient="horizontal",
+            length=460, showvalue=False, bg="#1e1e1e", fg="#eeeeee",
+            troughcolor="#333333", highlightthickness=0, activebackground="#4ea1ff",
+            command=self._on_cooldown_slide,
+        )
+        self.cooldown_slider.set(self.cooldown)
+        self.cooldown_slider.pack(side="left", fill="x", expand=True, padx=(10, 10))
 
         # ---- alert sounds panel ----
         sounds_frame = tk.LabelFrame(
@@ -401,9 +490,50 @@ class BarkApp:
                         command=self._on_mode_change, bg="#1e1e1e", fg="#eeeeee",
                         selectcolor="#333333", activebackground="#1e1e1e").pack(side="left", padx=(8, 0))
 
+    def _mic_current_value(self):
+        if self.device is None:
+            return DEFAULT_MIC_LABEL
+        for i, name in self.input_devices:
+            if i == self.device:
+                return f"{i}: {name}"
+        return DEFAULT_MIC_LABEL
+
+    def _on_mic_change(self, _event=None):
+        value = self.mic_var.get()
+        if value == DEFAULT_MIC_LABEL:
+            new_device = None
+        else:
+            try:
+                new_device = int(value.split(":", 1)[0])
+            except (ValueError, IndexError):
+                new_device = None
+
+        if new_device == self.device:
+            return
+
+        try:
+            self.stream.stop()
+            self.stream.close()
+        except Exception:
+            pass
+
+        self.device = new_device
+        self.mic_error = None
+        try:
+            self._start_audio()
+        except Exception as e:
+            self.mic_error = str(e)
+            messagebox.showerror("Microphone", f"Could not open that microphone:\n{e}")
+        self._save_config()
+
     def _on_threshold_slide(self, value):
         self.threshold = float(value)
         self.threshold_value_label.config(text=f"{self.threshold:.2f}")
+        self._save_config()
+
+    def _on_cooldown_slide(self, value):
+        self.cooldown = float(value)
+        self.cooldown_value_label.config(text=f"{self.cooldown:.0f}")
         self._save_config()
 
     def _on_mode_change(self):
@@ -476,6 +606,8 @@ class BarkApp:
         cfg = configparser.ConfigParser()
         data = dict(self._cfg_raw)
         data["bark_threshold"] = f"{self.threshold:.2f}"
+        data["cooldown_seconds"] = f"{self.cooldown:.0f}"
+        data["device"] = "" if self.device is None else str(self.device)
         data["sound_mode"] = self.sound_mode
         data["sound_files_enabled"] = ",".join(self._get_enabled_sound_names())
         cfg["bark"] = data
@@ -578,8 +710,7 @@ class BarkApp:
             fg="#ff8080" if flashing else "#eeeeee",
         )
         self.detail_label.config(
-            text=f"v{self.version}  cooldown={self.cooldown:.0f}s  "
-                 f"mic={self.device or 'system default'}  mode={self.sound_mode}"
+            text=f"v{self.version}  mic={self._mic_display_name()}  mode={self.sound_mode}"
         )
 
 

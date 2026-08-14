@@ -24,22 +24,25 @@ Windows PC or a USB drive.
   waits `cooldown_seconds` before it can alert again.
 - A live graph shows the confidence line and the threshold line so you
   can see it working.
+- Ships with two default alert sounds (`sit-down.wav` is ticked by
+  default, `sit-down-sorry-dog.wav` is available but unticked) so it
+  works immediately after download.
 
 ### Live controls (in the app window, no restart needed)
 
-- **Threshold slider** - drag it while the app is running to tune
-  sensitivity in real time; the graph's threshold line moves with it
-  and the new value is saved to `config.ini` immediately.
+- **Microphone** - pick any input device from the dropdown; it
+  switches immediately.
+- **Bark threshold slider** - drag it while the app is running to tune
+  sensitivity in real time; the graph's threshold line moves with it.
+- **Cooldown slider** - how many seconds to wait between alerts (0-60s).
 - **Alert sounds** - drop `.wav` files into the `sounds` folder next
-  to the app (created on first run), click "Refresh list", then tick
-  the ones you want active.
+  to the app, click "Refresh list", then tick the ones you want active.
 - **Play mode** - "In order" cycles through your ticked sounds one
   after another each time a bark is detected; "Random" picks a
   different ticked one at random each time.
 
-See `config.ini` (auto-created next to the exe on first run) for every
-setting, including ones without a UI control yet (`cooldown_seconds`,
-`device`, `history_seconds`, `auto_update`).
+All of the above save to `config.ini` immediately as you change them -
+no restart, no manual editing required.
 
 ## Auto-update
 
@@ -59,7 +62,7 @@ whatever version you currently have.
 
 ## Building it yourself / releasing a new version
 
-Pushing a tag like `v1.2.0` triggers `.github/workflows/release.yml`,
+Pushing a tag like `v1.3.1` triggers `.github/workflows/release.yml`,
 which builds `BarkDetectorML.exe` on a Windows runner, generates
 `checksums.txt`, and publishes both as a GitHub Release with that tag
 as the version. Any app already installed will pick it up automatically
@@ -75,6 +78,7 @@ py -3.11 -m venv venv
   --add-data "yamnet.tflite;." `
   --add-data "yamnet_class_map.csv;." `
   --add-data "version.txt;." `
+  --add-data "default_sounds;default_sounds" `
   --collect-all ai_edge_litert `
   --collect-data certifi `
   bark_detector_ml.py
@@ -89,6 +93,9 @@ py -3.11 -m venv venv
   published `checksums.txt` for that release.
 
 ## Changelog
+- v1.3.0: microphone picker, cooldown slider, bundled default alert
+  sounds (`sit-down.wav` ticked by default, `sit-down-sorry-dog.wav`
+  available unticked).
 - v1.1.0: live threshold slider, tick-box alert sound list (in
   order / random playback).
 - v1.0.1: test release to verify auto-update.

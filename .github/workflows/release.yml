@@ -35,6 +35,7 @@ jobs:
           --add-data "yamnet.tflite;."
           --add-data "yamnet_class_map.csv;."
           --add-data "version.txt;."
+          --add-data "default_sounds;default_sounds"
           --collect-all ai_edge_litert
           --collect-data certifi
           bark_detector_ml.py

@@ -75,3 +75,7 @@ py -3.11 -m venv venv
 - Auto-update is read-only against GitHub's public release API and
   will only install a binary whose SHA-256 checksum matches the
   published `checksums.txt` for that release.
+
+## Changelog
+- v1.0.1: test release to verify auto-update.
+

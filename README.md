@@ -26,7 +26,8 @@ Windows PC or a USB drive.
   can see it working.
 - Ships with two default alert sounds (`sit-down.wav` is ticked by
   default, `sit-down-sorry-dog.wav` is available but unticked) so it
-  works immediately after download.
+  works immediately after download. Both are Barnaby Joyce saying
+  "Sit down!" from his [ABC 7.30 Report interview](https://www.youtube.com/shorts/4qlDBmeiGaM).
 
 ### Live controls (in the app window, no restart needed)
 
@@ -95,7 +96,9 @@ py -3.11 -m venv venv
 ## Changelog
 - v1.3.0: microphone picker, cooldown slider, bundled default alert
   sounds (`sit-down.wav` ticked by default, `sit-down-sorry-dog.wav`
-  available unticked).
+  available unticked) - both clipped from Barnaby Joyce's
+  [ABC 7.30 Report interview](https://www.youtube.com/shorts/4qlDBmeiGaM)
+  saying "Sit down!".
 - v1.1.0: live threshold slider, tick-box alert sound list (in
   order / random playback).
 - v1.0.1: test release to verify auto-update.

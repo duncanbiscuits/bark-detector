@@ -13,21 +13,33 @@ check against this repo's GitHub releases, used for self-update.
 Grab `BarkDetectorML.exe` from the
 [latest release](https://github.com/duncanbiscuits/bark-detector/releases/latest).
 No install, no Python needed - just run it. It's portable, so you can
-copy it (and its `config.ini` once created) to any Windows PC or a USB
-drive.
+copy it (and its `config.ini` and `sounds` folder once created) to any
+Windows PC or a USB drive.
 
 ## How it works
 
 - Microphone audio is checked ~5x/second against YAMNet's Dog / Bark /
   Bow-wow / Howl / Growling classes.
-- If the confidence crosses `bark_threshold` in `config.ini`, it plays
-  an alert sound (a built-in beep, or your own `.wav` if you set one)
-  and waits `cooldown_seconds` before it can alert again.
+- If the confidence crosses the threshold, it plays an alert sound and
+  waits `cooldown_seconds` before it can alert again.
 - A live graph shows the confidence line and the threshold line so you
-  can see it working and tune the threshold visually.
+  can see it working.
 
-See `config.ini` (auto-created next to the exe on first run) for all
-settings.
+### Live controls (in the app window, no restart needed)
+
+- **Threshold slider** - drag it while the app is running to tune
+  sensitivity in real time; the graph's threshold line moves with it
+  and the new value is saved to `config.ini` immediately.
+- **Alert sounds** - drop `.wav` files into the `sounds` folder next
+  to the app (created on first run), click "Refresh list", then tick
+  the ones you want active.
+- **Play mode** - "In order" cycles through your ticked sounds one
+  after another each time a bark is detected; "Random" picks a
+  different ticked one at random each time.
+
+See `config.ini` (auto-created next to the exe on first run) for every
+setting, including ones without a UI control yet (`cooldown_seconds`,
+`device`, `history_seconds`, `auto_update`).
 
 ## Auto-update
 
@@ -77,5 +89,6 @@ py -3.11 -m venv venv
   published `checksums.txt` for that release.
 
 ## Changelog
+- v1.1.0: live threshold slider, tick-box alert sound list (in
+  order / random playback).
 - v1.0.1: test release to verify auto-update.
-

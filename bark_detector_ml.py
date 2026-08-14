@@ -7,6 +7,10 @@ bark/dog/howl/growl sound (not just "loud"), and plays an alert when
 its confidence crosses a threshold. Shows a live scrolling graph of
 that confidence against the threshold line, and flashes when it fires.
 
+You can tick which alert sound files to use (played in order or at
+random) and drag the threshold slider to tune sensitivity live, both
+from the app window - no need to edit config.ini for these.
+
 On startup it also checks GitHub for a newer release, and if one is
 available, downloads it, verifies its checksum, and restarts itself
 on the new version. This only runs when packaged as an .exe - running
@@ -31,6 +35,8 @@ import csv
 import hashlib
 import json
 import os
+import random
+import shutil
 import ssl
 import subprocess
 import sys
@@ -40,6 +46,7 @@ import tkinter as tk
 import urllib.request
 from collections import deque
 from datetime import datetime
+from tkinter import filedialog, messagebox
 
 import numpy as np
 import sounddevice as sd
@@ -52,6 +59,7 @@ CONFIG_FILENAME = "config.ini"
 MODEL_FILENAME = "yamnet.tflite"
 LABELS_FILENAME = "yamnet_class_map.csv"
 VERSION_FILENAME = "version.txt"
+SOUNDS_DIRNAME = "sounds"
 TARGET_LABELS = ["Dog", "Bark", "Bow-wow", "Howl", "Growling"]
 SAMPLE_RATE = 16000
 RING_SECONDS = 1.5
@@ -66,12 +74,14 @@ UPDATE_CHECK_TIMEOUT = 6
 UPDATE_DOWNLOAD_TIMEOUT = 60
 
 DEFAULTS = {
-    "bark_threshold": "0.3",   # 0.0-1.0 confidence needed to count as a bark
-    "cooldown_seconds": "5",   # minimum gap between two alerts
-    "sound_file": "",          # path to a .wav to play; blank = built-in beep
-    "device": "",              # blank = system default microphone
-    "history_seconds": "15",   # how much time the graph shows
-    "auto_update": "true",     # check GitHub for a newer release on startup
+    "bark_threshold": "0.3",       # 0.0-1.0 confidence needed to count as a bark
+    "cooldown_seconds": "5",       # minimum gap between two alerts
+    "sound_file": "",              # legacy single-sound setting, kept for compatibility
+    "device": "",                  # blank = system default microphone
+    "history_seconds": "15",       # how much time the graph shows
+    "auto_update": "true",         # check GitHub for a newer release on startup
+    "sound_mode": "order",         # "order" = cycle through ticked sounds, "random" = pick one at random
+    "sound_files_enabled": "",     # comma list of ticked filenames inside the sounds/ folder
 }
 
 
@@ -280,9 +290,28 @@ class BarkApp:
         self.version = version
         self.threshold = float(cfg["bark_threshold"])
         self.cooldown = float(cfg["cooldown_seconds"])
-        self.sound_file = cfg["sound_file"].strip()
         self.device = cfg["device"].strip() or None
         self.history_seconds = float(cfg["history_seconds"])
+        self._cfg_raw = dict(cfg)
+
+        self.sounds_dir = os.path.join(base_dir(), SOUNDS_DIRNAME)
+        os.makedirs(self.sounds_dir, exist_ok=True)
+        self.sound_mode = cfg.get("sound_mode", "order").strip() or "order"
+        self._enabled_from_cfg = [
+            s.strip() for s in cfg.get("sound_files_enabled", "").split(",") if s.strip()
+        ]
+        self._play_index = 0
+        self.available_sounds = []
+        self.sound_vars = {}
+
+        # One-time convenience: if the sounds folder is empty, seed it with
+        # whatever the old single "sound_file" setting pointed at.
+        legacy = cfg.get("sound_file", "").strip()
+        if legacy and os.path.exists(legacy) and not os.listdir(self.sounds_dir):
+            try:
+                shutil.copy(legacy, os.path.join(self.sounds_dir, os.path.basename(legacy)))
+            except Exception:
+                pass
 
         self.target_indices = load_target_indices()
         self.interpreter = Interpreter(model_path=resource_path(MODEL_FILENAME))
@@ -295,30 +324,166 @@ class BarkApp:
         self.flash_until = 0.0
 
         self._build_ui()
+        self._refresh_sound_list()
         self._start_audio()
         self.root.after(UPDATE_INTERVAL_MS, self._tick)
 
     # ---------- UI ----------
     def _build_ui(self):
         self.root.title(f"Bark Detector v{self.version}")
-        self.root.geometry("760x420")
+        self.root.geometry("780x660")
         self.root.configure(bg="#1e1e1e")
+        label_opts = dict(bg="#1e1e1e", fg="#eeeeee")
 
         self.status_label = tk.Label(
             self.root, text="Starting...", font=("Segoe UI", 12),
-            bg="#1e1e1e", fg="#eeeeee", justify="left", anchor="w",
+            justify="left", anchor="w", **label_opts,
         )
         self.status_label.pack(fill="x", padx=12, pady=(10, 4))
 
-        self.canvas = tk.Canvas(self.root, width=730, height=300, bg="#111111",
+        self.canvas = tk.Canvas(self.root, width=750, height=260, bg="#111111",
                                  highlightthickness=0)
         self.canvas.pack(padx=12, pady=6)
 
         self.detail_label = tk.Label(
-            self.root, text="", font=("Segoe UI", 10),
-            bg="#1e1e1e", fg="#9a9a9a", justify="left", anchor="w",
+            self.root, text="", font=("Segoe UI", 10), fg="#9a9a9a",
+            justify="left", anchor="w", bg="#1e1e1e",
         )
-        self.detail_label.pack(fill="x", padx=12, pady=(0, 10))
+        self.detail_label.pack(fill="x", padx=12, pady=(0, 6))
+
+        # ---- threshold slider ----
+        thresh_frame = tk.Frame(self.root, bg="#1e1e1e")
+        thresh_frame.pack(fill="x", padx=12, pady=(4, 8))
+
+        tk.Label(thresh_frame, text="Bark threshold:", font=("Segoe UI", 10, "bold"),
+                 **label_opts).pack(side="left")
+        self.threshold_value_label = tk.Label(
+            thresh_frame, text=f"{self.threshold:.2f}", font=("Segoe UI", 10, "bold"),
+            fg="#4ea1ff", bg="#1e1e1e", width=5,
+        )
+        self.threshold_value_label.pack(side="right")
+
+        self.threshold_slider = tk.Scale(
+            thresh_frame, from_=0.0, to=1.0, resolution=0.01, orient="horizontal",
+            length=520, showvalue=False, bg="#1e1e1e", fg="#eeeeee",
+            troughcolor="#333333", highlightthickness=0, activebackground="#4ea1ff",
+            command=self._on_threshold_slide,
+        )
+        self.threshold_slider.set(self.threshold)
+        self.threshold_slider.pack(side="left", fill="x", expand=True, padx=(10, 10))
+
+        # ---- alert sounds panel ----
+        sounds_frame = tk.LabelFrame(
+            self.root, text="Alert sounds (tick to enable)", font=("Segoe UI", 10, "bold"),
+            bg="#1e1e1e", fg="#eeeeee", labelanchor="nw",
+        )
+        sounds_frame.pack(fill="both", expand=True, padx=12, pady=(0, 10))
+
+        self.sounds_list_frame = tk.Frame(sounds_frame, bg="#1e1e1e")
+        self.sounds_list_frame.pack(fill="both", expand=True, padx=10, pady=(8, 4), anchor="w")
+
+        buttons_row = tk.Frame(sounds_frame, bg="#1e1e1e")
+        buttons_row.pack(fill="x", padx=10, pady=(4, 4))
+
+        tk.Button(buttons_row, text="Add sound file(s)...", command=self._add_sound_files).pack(side="left")
+        tk.Button(buttons_row, text="Refresh list", command=self._refresh_sound_list).pack(side="left", padx=(8, 0))
+        tk.Label(buttons_row, text="(add/remove .wav files in the 'sounds' folder next to the app, then Refresh)",
+                 font=("Segoe UI", 8), fg="#777777", bg="#1e1e1e").pack(side="left", padx=(10, 0))
+
+        mode_row = tk.Frame(sounds_frame, bg="#1e1e1e")
+        mode_row.pack(fill="x", padx=10, pady=(2, 8))
+        tk.Label(mode_row, text="Play ticked sounds:", **label_opts).pack(side="left")
+        self.sound_mode_var = tk.StringVar(value=self.sound_mode)
+        tk.Radiobutton(mode_row, text="In order", variable=self.sound_mode_var, value="order",
+                        command=self._on_mode_change, bg="#1e1e1e", fg="#eeeeee",
+                        selectcolor="#333333", activebackground="#1e1e1e").pack(side="left", padx=(8, 0))
+        tk.Radiobutton(mode_row, text="Random", variable=self.sound_mode_var, value="random",
+                        command=self._on_mode_change, bg="#1e1e1e", fg="#eeeeee",
+                        selectcolor="#333333", activebackground="#1e1e1e").pack(side="left", padx=(8, 0))
+
+    def _on_threshold_slide(self, value):
+        self.threshold = float(value)
+        self.threshold_value_label.config(text=f"{self.threshold:.2f}")
+        self._save_config()
+
+    def _on_mode_change(self):
+        self.sound_mode = self.sound_mode_var.get()
+        self._play_index = 0
+        self._save_config()
+
+    def _refresh_sound_list(self):
+        for w in self.sounds_list_frame.winfo_children():
+            w.destroy()
+
+        try:
+            self.available_sounds = sorted(
+                f for f in os.listdir(self.sounds_dir) if f.lower().endswith(".wav")
+            )
+        except OSError:
+            self.available_sounds = []
+
+        previously_enabled = self._get_enabled_sound_names() if self.sound_vars else None
+        enabled_default = set(previously_enabled) if previously_enabled is not None else (
+            set(self._enabled_from_cfg) if self._enabled_from_cfg else set(self.available_sounds)
+        )
+
+        self.sound_vars = {}
+        if not self.available_sounds:
+            tk.Label(
+                self.sounds_list_frame,
+                text="No sound files yet - click 'Add sound file(s)...' below.\n"
+                     "Until you add one, the built-in beep is used.",
+                bg="#1e1e1e", fg="#9a9a9a", font=("Segoe UI", 9), justify="left",
+            ).pack(anchor="w")
+        else:
+            for name in self.available_sounds:
+                var = tk.BooleanVar(value=name in enabled_default)
+                tk.Checkbutton(
+                    self.sounds_list_frame, text=name, variable=var,
+                    bg="#1e1e1e", fg="#eeeeee", selectcolor="#333333",
+                    activebackground="#1e1e1e", activeforeground="#ffffff",
+                    font=("Segoe UI", 9), anchor="w",
+                    command=self._on_sound_toggle,
+                ).pack(anchor="w", fill="x")
+                self.sound_vars[name] = var
+
+        self._save_config()
+
+    def _on_sound_toggle(self):
+        self._play_index = 0
+        self._save_config()
+
+    def _get_enabled_sound_names(self):
+        return [name for name, var in self.sound_vars.items() if var.get()]
+
+    def _add_sound_files(self):
+        paths = filedialog.askopenfilenames(
+            title="Choose alert sound file(s)", filetypes=[("WAV audio", "*.wav")]
+        )
+        for p in paths:
+            try:
+                dest = os.path.join(self.sounds_dir, os.path.basename(p))
+                if os.path.abspath(p) != os.path.abspath(dest):
+                    shutil.copy(p, dest)
+            except Exception as e:
+                messagebox.showerror("Add sound file", f"Could not add {p}:\n{e}")
+        if paths:
+            self._refresh_sound_list()
+
+    # ---------- audio + config persistence ----------
+    def _save_config(self):
+        path = os.path.join(base_dir(), CONFIG_FILENAME)
+        cfg = configparser.ConfigParser()
+        data = dict(self._cfg_raw)
+        data["bark_threshold"] = f"{self.threshold:.2f}"
+        data["sound_mode"] = self.sound_mode
+        data["sound_files_enabled"] = ",".join(self._get_enabled_sound_names())
+        cfg["bark"] = data
+        try:
+            with open(path, "w") as f:
+                cfg.write(f)
+        except OSError as e:
+            print(f"  ! could not save config.ini: {e}")
 
     def _start_audio(self):
         def callback(indata, frames, time_info, status):
@@ -334,6 +499,17 @@ class BarkApp:
             callback=callback,
         )
         self.stream.start()
+
+    def _play_next_sound(self):
+        enabled = [os.path.join(self.sounds_dir, n) for n in self._get_enabled_sound_names()]
+        if not enabled:
+            play_alert("")  # built-in beep fallback
+            return
+        if self.sound_mode == "random":
+            play_alert(random.choice(enabled))
+        else:
+            play_alert(enabled[self._play_index % len(enabled)])
+            self._play_index += 1
 
     # ---------- main loop ----------
     def _tick(self):
@@ -356,7 +532,7 @@ class BarkApp:
             self.last_alert_str = datetime.now().strftime("%H:%M:%S")
             self.flash_until = now + 0.6
             triggered = True
-            play_alert(self.sound_file)
+            self._play_next_sound()
 
         self._redraw(score, triggered)
         self.root.after(UPDATE_INTERVAL_MS, self._tick)
@@ -402,8 +578,8 @@ class BarkApp:
             fg="#ff8080" if flashing else "#eeeeee",
         )
         self.detail_label.config(
-            text=f"v{self.version}  threshold={self.threshold:.2f}  cooldown={self.cooldown:.0f}s  "
-                 f"mic={self.device or 'system default'}  (edit config.ini to change)"
+            text=f"v{self.version}  cooldown={self.cooldown:.0f}s  "
+                 f"mic={self.device or 'system default'}  mode={self.sound_mode}"
         )
 
 
